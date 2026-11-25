@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Family Tree</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --ink: #1e293b;
+    --muted: #64748b;
+    --line: #94a3b8;
+    --focus: #f59e0b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    overflow: hidden;
+  }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+  /* Pan/zoom viewport. The canvas is centred here, so its centre is the zoom origin. */
+  #viewport {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px;
+    overflow: hidden;
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+  #viewport.dragging { cursor: grabbing; }
+  #tree-canvas {
+    position: relative;
+    flex: 0 0 auto;
+    transform-origin: center center;
+  }
+  /* Connector layer: one path for the whole tree, drawn behind the cards. */
+  #links {
+    position: absolute;
+    left: 0;
+    top: 0;
+    overflow: visible;
+    pointer-events: none;
+  }
+  #links path {
+    fill: none;
+    stroke: var(--line);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* Layout. A couple is one row. Top-level children sit in one row; deeper groups stack under the parent. */
+  .tree { list-style: none; display: flex; align-items: flex-start; gap: 36px; }
+  .unit { list-style: none; display: flex; flex-direction: column; align-items: center; }
+  .unit.left { align-items: flex-start; }
+  .couple { display: flex; align-items: stretch; }
+  .kids {
+    list-style: none;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 46px;
+  }
+  .kids > .unit { padding: 0 8px; }
+  .kids.stacked {
+    flex-direction: column;
+    justify-content: flex-start;
+    align-items: flex-start;
+    padding: 34px 0 0 28px;
+  }
+  .kids.stacked > .unit { padding: 0; margin-bottom: 12px; }
+
+  /* Person card: compact, no reserved space */
+  .card {
+    position: relative;
+    z-index: 1;
+    width: 184px;
+    flex: none;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-top: 4px solid var(--accent, var(--line));
+    border-radius: 12px;
+    padding: 12px 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
+    cursor: pointer;
+  }
+  .card.male { --accent: #3b82f6; }
+  .card.female { --accent: #ec4899; }
+  .card.unknown { --accent: #94a3b8; }
+  .card:hover { box-shadow: 0 6px 14px rgba(15, 23, 42, 0.14); }
+  .card.selected { box-shadow: 0 0 0 3px #3b82f6, 0 6px 14px rgba(15, 23, 42, 0.14); }
+  .card.deceased .avatar { filter: grayscale(0.7); }
+
+  .avatar {
+    position: relative;
+    width: 44px;
+    height: 44px;
+    flex: none;
+    border-radius: 50%;
+    overflow: hidden;
+    margin-bottom: 6px;
+  }
+  .avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .avatar-initials {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    font-weight: 600;
+    font-size: 15px;
+  }
+  .avatar-initials.male { background: #dbeafe; color: #1d4ed8; }
+  .avatar-initials.female { background: #fce7f3; color: #be185d; }
+  .avatar-initials.unknown { background: #e2e8f0; color: #475569; }
+
+  .name {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    font-weight: 700;
+    font-size: 18px;
+    line-height: 1.2;
+  }
+  .name span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .g-icon { width: 15px; height: 15px; flex: none; }
+  .g-icon.male { color: #3b82f6; }
+  .g-icon.female { color: #ec4899; }
+  .dates { margin-top: 4px; font-size: 14px; color: var(--muted); }
+
+  /* Marriage column: partner line at mid-height, heart button on it, descendant button below */
+  .marriage {
+    position: relative;
+    z-index: 2;
+    flex: 0 0 44px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+  .marriage::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    border-top: 2px solid var(--line);
+  }
+  .marriage.collapsed { flex-basis: 30px; }
+  .marriage.collapsed::before { display: none; }
+
+  .heart-btn {
+    position: relative;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #fecaca;
+    border-radius: 50%;
+    background: #fff;
+    color: #ef4444;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+  }
+  .heart-btn svg { width: 15px; height: 15px; display: block; }
+  .heart-btn:hover { background: #fef2f2; }
+  .heart-btn[aria-expanded="false"] { background: #f8fafc; color: #cbd5e1; border-style: dashed; }
+
+  /* Descendant button: sits centred under the heart (or under a single person's card) */
+  .desc-btn {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translate(-50%, 10px);
+    z-index: 3;
+    height: 30px;
+    min-width: 58px;
+    padding: 0 10px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    border: 1px solid #94a3b8;
+    border-radius: 999px;
+    background: #fff;
+    color: var(--ink);
+    font: 600 13px/1 system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    cursor: pointer;
+    box-shadow: 0 2px 5px rgba(15, 23, 42, 0.14);
+  }
+  .desc-btn svg { width: 15px; height: 15px; flex: none; }
+  .desc-btn svg path { fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; }
+  .desc-btn .v { display: none; }
+  .desc-btn[aria-expanded="false"] .v { display: inline; }
+  .desc-btn[aria-expanded="false"] { background: #f8fafc; border-style: dashed; color: var(--muted); }
+  .desc-btn:hover { background: #f1f5f9; }
+
+  /* Controls */
+  #controls {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 1000;
+    display: flex;
+    gap: 6px;
+  }
+  #controls button {
+    min-width: 44px;
+    height: 40px;
+    padding: 0 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+    font: inherit;
+    font-size: 15px;
+    cursor: pointer;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }
+  #controls button:hover { background: #f8fafc; }
+
+  /* Search */
+  #search {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 1000;
+    width: min(300px, calc(100vw - 340px));
+  }
+  #search input {
+    width: 100%;
+    height: 40px;
+    padding: 0 12px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    background: #fff;
+    color: var(--ink);
+    font: inherit;
+    font-size: 14px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  }
+  #search-results {
+    list-style: none;
+    margin-top: 6px;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  #search-results button {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px;
+    border: none;
+    background: none;
+    font: inherit;
+    font-size: 14px;
+    text-align: left;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  #search-results button:hover,
+  #search-results button:focus-visible { background: #f1f5f9; outline: none; }
+  #search-results small { color: var(--muted); white-space: nowrap; }
+  #search-results .none { padding: 8px 12px; color: var(--muted); font-size: 14px; }
+
+  /* Living-member summary: collapsed by default so it does not cover the tree */
+  .stats {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    z-index: 900;
+    min-width: 230px;
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+    font-size: 13px;
+  }
+  .stats summary { cursor: pointer; padding: 10px 14px; font-weight: 600; }
+  .stats table { width: 100%; border-collapse: collapse; }
+  .stats td { padding: 5px 14px; border-top: 1px solid #f1f5f9; }
+  .stats td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+  .stats tr.total td { font-weight: 700; }
+
+  /* Clean view for screenshots and slides (press H) */
+  body.clean #search,
+  body.clean #controls,
+  body.clean .stats { display: none; }
+
+  /* Detail panel */
+  #detail-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 360px;
+    max-width: 92vw;
+    background: #fff;
+    box-shadow: -4px 0 20px rgba(15, 23, 42, 0.15);
+    padding: 24px;
+    transform: translateX(105%);
+    transition: transform 0.25s ease;
+    z-index: 2000;
+    overflow-y: auto;
+  }
+  #detail-panel.open { transform: none; }
+  #close-panel {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 36px;
+    height: 36px;
+    border: none;
+    background: none;
+    font-size: 26px;
+    line-height: 1;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  #close-panel:hover { color: var(--ink); }
+  .p-head { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; padding-right: 32px; }
+  .p-head .avatar { width: 72px; height: 72px; margin: 0; }
+  .p-head .avatar-initials { font-size: 24px; }
+  .p-head h2 { font-size: 20px; display: flex; align-items: center; gap: 6px; }
+  .p-head .g-icon { width: 18px; height: 18px; }
+  .field { margin-bottom: 16px; }
+  .label {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 4px;
+  }
+  .value { font-size: 15px; }
+  .rels { display: flex; flex-wrap: wrap; gap: 6px; }
+  button.rel {
+    border: 1px solid #e2e8f0;
+    background: #f8fafc;
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button.rel:hover { border-color: #3b82f6; }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="icon-male" viewBox="0 0 24 24"><circle cx="12" cy="6" r="4" fill="currentColor"/><path d="M5 22v-6a5 5 0 0 1 5-5h4a5 5 0 0 1 5 5v6z" fill="currentColor"/></symbol><symbol id="icon-female" viewBox="0 0 24 24"><circle cx="12" cy="6" r="4" fill="currentColor"/><path d="M9.5 11h5l3.5 11h-12z" fill="currentColor"/></symbol><symbol id="icon-heart" viewBox="0 0 24 24"><path d="M12 21C5 16 2 13 2 8.5 2 5.4 4.4 3 7.5 3c1.9 0 3.5 1 4.5 2.5C13 4 14.6 3 16.5 3 19.6 3 22 5.4 22 8.5 22 13 19 16 12 21z" fill="currentColor"/></symbol></svg>
+
+<div id="search">
+  <input id="search-input" type="search" placeholder="Find a person ( / )" aria-label="Find a person" autocomplete="off">
+  <ul id="search-results" hidden></ul>
+</div>
+
+<div id="controls">
+  <button id="zoom-in" aria-label="Zoom in">+</button>
+  <button id="zoom-out" aria-label="Zoom out">&minus;</button>
+  <button id="fit" aria-label="Fit whole tree in window">Fit</button>
+  <button id="clean" aria-label="Hide controls for screenshots">Hide UI</button>
+</div>
+
+<div id="viewport">
+  <div id="tree-canvas">
+    <svg id="links" aria-hidden="true"><path id="links-path" d=""></path></svg>
+    <ul class="tree"><li class="unit" data-main="nagardas"><div class="couple"><div class="card male deceased" role="button" tabindex="0" data-pid="nagardas" aria-label="Nagardas"><div class="avatar"><span class="avatar-initials male">NA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Nagardas</span></div><div class="dates">d. 1983-01-17</div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="83" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>83</span></button></div><div class="card female deceased" role="button" tabindex="0" data-pid="dahiben" aria-label="Dahiben"><div class="avatar"><span class="avatar-initials female">DA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Dahiben</span></div><div class="dates">d. 1959-07</div></div></div><ul class="kids"><li class="unit left" data-main="punamchand"><div class="couple"><div class="card male deceased" role="button" tabindex="0" data-pid="punamchand" aria-label="Punamchand"><div class="avatar"><span class="avatar-initials male">PU</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Punamchand</span></div><div class="dates">d. 1998-09-15</div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="16" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>16</span></button></div><div class="card female deceased" role="button" tabindex="0" data-pid="narmadaben" aria-label="Narmadaben"><div class="avatar"><span class="avatar-initials female">NA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Narmadaben</span></div><div class="dates">d. 2006-02-28</div></div></div><ul class="kids stacked"><li class="unit left" data-main="rashmi"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="rashmi" aria-label="Rashmi"><div class="avatar"><span class="avatar-initials male">RA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Rashmi</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="jaya" aria-label="Jaya"><div class="avatar"><span class="avatar-initials female">JA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Jaya</span></div></div></div><ul class="kids"><li class="unit" data-main="chaitali"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="chaitali" aria-label="Chaitali"><div class="avatar"><span class="avatar-initials female">CH</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Chaitali</span></div></div></div></li></ul></li><li class="unit left" data-main="alka"><div class="couple"><div class="card male deceased" role="button" tabindex="0" data-pid="mohanlal_alka" aria-label="Mohanlal"><div class="avatar"><span class="avatar-initials male">MO</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Mohanlal</span></div><div class="dates">d. 2017-06-23</div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="alka" aria-label="Alka"><div class="avatar"><span class="avatar-initials female">AL</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Alka</span></div></div></div></li><li class="unit left" data-main="parikshit"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="parikshit" aria-label="Parikshit"><div class="avatar"><span class="avatar-initials male">PA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Parikshit</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="naneeta" aria-label="Naneeta"><div class="avatar"><span class="avatar-initials female">NA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Naneeta</span></div></div></div><ul class="kids"><li class="unit" data-main="krisha"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="krisha" aria-label="Krisha"><div class="avatar"><span class="avatar-initials female">KR</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Krisha</span></div><div class="dates">b. 2014-08-21</div></div></div></li></ul></li><li class="unit left" data-main="harshad"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="harshad" aria-label="Harshad"><div class="avatar"><span class="avatar-initials male">HA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Harshad</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="4" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>4</span></button></div><div class="card female" role="button" tabindex="0" data-pid="kalyani" aria-label="Kalyani"><div class="avatar"><span class="avatar-initials female">KA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Kalyani</span></div></div></div><ul class="kids"><li class="unit" data-main="pooja"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="vikram" aria-label="Vikram"><div class="avatar"><span class="avatar-initials male">VI</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Vikram</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="pooja" aria-label="Pooja"><div class="avatar"><span class="avatar-initials female">PO</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Pooja</span></div></div></div><ul class="kids"><li class="unit" data-main="devanshi"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="devanshi" aria-label="Devanshi"><div class="avatar"><span class="avatar-initials female">DE</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Devanshi</span></div><div class="dates">b. 2017-09-09</div></div></div></li></ul></li><li class="unit" data-main="priya"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="priya" aria-label="Priya"><div class="avatar"><span class="avatar-initials female">PR</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Priya</span></div></div></div></li></ul></li><li class="unit left" data-main="bakul"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="bakul" aria-label="Bakul"><div class="avatar"><span class="avatar-initials female">BA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Bakul</span></div></div></div></li><li class="unit left" data-main="mini"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="mini" aria-label="Mini"><div class="avatar"><span class="avatar-initials female">MI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Mini</span></div></div></div></li></ul></li><li class="unit left" data-main="mohanlal_sr"><div class="couple"><div class="card male deceased" role="button" tabindex="0" data-pid="mohanlal_sr" aria-label="Mohanlal"><div class="avatar"><span class="avatar-initials male">MO</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Mohanlal</span></div><div class="dates">d. 2006-05-10</div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="24" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>24</span></button></div><div class="card female deceased" role="button" tabindex="0" data-pid="giriaben" aria-label="Giriaben"><div class="avatar"><span class="avatar-initials female">GI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Giriaben</span></div><div class="dates">d. 2020-03-30</div></div></div><ul class="kids stacked"><li class="unit left" data-main="bharat"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="bharat" aria-label="Bharat"><div class="avatar"><span class="avatar-initials male">BH</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Bharat</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="5" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>5</span></button></div><div class="card female deceased" role="button" tabindex="0" data-pid="veena" aria-label="Veena"><div class="avatar"><span class="avatar-initials female">VE</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Veena</span></div><div class="dates">d. 2019-08-14</div></div></div><ul class="kids"><li class="unit" data-main="akshay"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="akshay" aria-label="Akshay"><div class="avatar"><span class="avatar-initials male">AK</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Akshay</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="zalak" aria-label="Zalak"><div class="avatar"><span class="avatar-initials female">ZA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Zalak</span></div></div></div><ul class="kids"><li class="unit" data-main="shreeya"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="shreeya" aria-label="Shreeya"><div class="avatar"><span class="avatar-initials female">SH</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Shreeya</span></div><div class="dates">b. 2015-07-05</div></div></div></li></ul></li><li class="unit" data-main="manan"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="manan" aria-label="Manan"><div class="avatar"><span class="avatar-initials male">MA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Manan</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="shruti" aria-label="Shruti"><div class="avatar"><span class="avatar-initials female">SH</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Shruti</span></div></div></div></li></ul></li><li class="unit left" data-main="renuka"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="narendra" aria-label="Narendra"><div class="avatar"><span class="avatar-initials male">NA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Narendra</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="5" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>5</span></button></div><div class="card female" role="button" tabindex="0" data-pid="renuka" aria-label="Renuka"><div class="avatar"><span class="avatar-initials female">RE</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Renuka</span></div></div></div><ul class="kids"><li class="unit" data-main="rutvij"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="rutvij" aria-label="Rutvij"><div class="avatar"><span class="avatar-initials male">RU</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Rutvij</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="2" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>2</span></button></div><div class="card female" role="button" tabindex="0" data-pid="shairee" aria-label="Shairee"><div class="avatar"><span class="avatar-initials female">SH</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Shairee</span></div></div></div><ul class="kids"><li class="unit" data-main="nishtha"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="nishtha" aria-label="Nishtha"><div class="avatar"><span class="avatar-initials female">NI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Nishtha</span></div><div class="dates">b. 2017-05-11</div></div></div></li><li class="unit" data-main="twisha"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="twisha" aria-label="Twisha"><div class="avatar"><span class="avatar-initials female">TW</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Twisha</span></div><div class="dates">b. 2020-06-03</div></div></div></li></ul></li><li class="unit" data-main="viral"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="viral" aria-label="Viral"><div class="avatar"><span class="avatar-initials male">VI</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Viral</span></div></div></div></li></ul></li><li class="unit left" data-main="pradueman"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="pradueman" aria-label="Pradueman"><div class="avatar"><span class="avatar-initials male">PR</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Pradueman</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="pratima" aria-label="Pratima"><div class="avatar"><span class="avatar-initials female">PR</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Pratima</span></div></div></div></li><li class="unit left" data-main="pratik"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="pratik" aria-label="Pratik"><div class="avatar"><span class="avatar-initials male">PR</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Pratik</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="hiral" aria-label="Hiral"><div class="avatar"><span class="avatar-initials female">HI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Hiral</span></div></div></div></li><li class="unit left" data-main="manoj"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="manoj" aria-label="Manoj"><div class="avatar"><span class="avatar-initials male">MA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Manoj</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="ashwini" aria-label="Ashwini"><div class="avatar"><span class="avatar-initials female">AS</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Ashwini</span></div></div></div></li><li class="unit left" data-main="mohit"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="mohit" aria-label="Mohit"><div class="avatar"><span class="avatar-initials male">MO</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Mohit</span></div></div></div></li><li class="unit left" data-main="rohini"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="rajendra" aria-label="Rajendra"><div class="avatar"><span class="avatar-initials male">RA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Rajendra</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="rohini" aria-label="Rohini"><div class="avatar"><span class="avatar-initials female">RO</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Rohini</span></div></div></div><ul class="kids"><li class="unit" data-main="revati"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="revati" aria-label="Revati"><div class="avatar"><span class="avatar-initials female">RE</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Revati</span></div></div></div></li></ul></li></ul></li><li class="unit" data-main="shantibhai"><div class="couple"><div class="card male deceased" role="button" tabindex="0" data-pid="shantibhai" aria-label="Shantibhai"><div class="avatar"><span class="avatar-initials male">SH</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Shantibhai</span></div><div class="dates">d. 2021-05-02</div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="3" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>3</span></button></div><div class="card female" role="button" tabindex="0" data-pid="gopikaben" aria-label="Gopikaben"><div class="avatar"><span class="avatar-initials female">GO</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Gopikaben</span></div></div></div><ul class="kids"><li class="unit" data-main="seema"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="amit" aria-label="Amit"><div class="avatar"><span class="avatar-initials male">AM</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Amit</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="seema" aria-label="Seema"><div class="avatar"><span class="avatar-initials female">SE</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Seema</span></div></div></div></li><li class="unit" data-main="anjali"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="anjali" aria-label="Anjali"><div class="avatar"><span class="avatar-initials female">AN</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Anjali</span></div></div></div></li></ul></li><li class="unit" data-main="nanubhai"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="nanubhai" aria-label="Nanubhai"><div class="avatar"><span class="avatar-initials male">NA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Nanubhai</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="15" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>15</span></button></div><div class="card female deceased" role="button" tabindex="0" data-pid="sushilaben" aria-label="Sushilaben"><div class="avatar"><span class="avatar-initials female">SU</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Sushilaben</span></div><div class="dates">d. 2015-02-27</div></div></div><ul class="kids"><li class="unit left" data-main="pankaj"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="pankaj" aria-label="Pankaj (Raja)"><div class="avatar"><span class="avatar-initials male">P(</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Pankaj (Raja)</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="13" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>13</span></button></div><div class="card female" role="button" tabindex="0" data-pid="saroj" aria-label="Saroj"><div class="avatar"><span class="avatar-initials female">SA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Saroj</span></div></div></div><ul class="kids stacked"><li class="unit left" data-main="amiira"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="amiira" aria-label="Amiira"><div class="avatar"><span class="avatar-initials female">AM</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Amiira</span></div><div class="dates">b. 2018-01-18</div></div></div></li><li class="unit left" data-main="tiaara"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="tiaara" aria-label="Tiaara"><div class="avatar"><span class="avatar-initials female">TI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Tiaara</span></div><div class="dates">b. 2019-10-01</div></div></div></li><li class="unit left" data-main="akanksha"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="shahid" aria-label="Shahid"><div class="avatar"><span class="avatar-initials male">SH</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Shahid</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="akanksha" aria-label="Akanksha"><div class="avatar"><span class="avatar-initials female">AK</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Akanksha</span></div></div></div></li><li class="unit left" data-main="trishna"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="rohail" aria-label="Rohail"><div class="avatar"><span class="avatar-initials male">RO</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Rohail</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="trishna" aria-label="Trishna"><div class="avatar"><span class="avatar-initials female">TR</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Trishna</span></div></div></div></li><li class="unit left" data-main="swapneel"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="swapneel" aria-label="Swapneel"><div class="avatar"><span class="avatar-initials male">SW</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Swapneel</span></div></div></div></li><li class="unit left" data-main="rita"><div class="couple"><div class="card female deceased" role="button" tabindex="0" data-pid="rita" aria-label="Rita"><div class="avatar"><span class="avatar-initials female">RI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Rita</span></div><div class="dates">d. 2003-04-16</div><button type="button" class="desc-btn" data-toggle="desc" data-count="5" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>5</span></button></div></div><ul class="kids"><li class="unit" data-main="nita"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="sunilkumar" aria-label="Sunilkumar"><div class="avatar"><span class="avatar-initials male">SU</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Sunilkumar</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="nita" aria-label="Nita"><div class="avatar"><span class="avatar-initials female">NI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Nita</span></div></div></div></li><li class="unit" data-main="dina"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="dinyar" aria-label="Dinyar"><div class="avatar"><span class="avatar-initials male">DI</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Dinyar</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="dina" aria-label="Dina"><div class="avatar"><span class="avatar-initials female">DI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Dina</span></div></div></div><ul class="kids"><li class="unit" data-main="diana"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="diana" aria-label="Diana"><div class="avatar"><span class="avatar-initials female">DI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Diana</span></div></div></div></li></ul></li></ul></li></ul></li></ul></li><li class="unit left" data-main="govindbhai"><div class="couple"><div class="card male deceased" role="button" tabindex="0" data-pid="govindbhai" aria-label="Govindbhai"><div class="avatar"><span class="avatar-initials male">GO</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Govindbhai</span></div><div class="dates">d. 2021-05-16</div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="15" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>15</span></button></div><div class="card female" role="button" tabindex="0" data-pid="jashodaben" aria-label="Jashodaben"><div class="avatar"><span class="avatar-initials female">JA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Jashodaben</span></div></div></div><ul class="kids stacked"><li class="unit left" data-main="gita"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="rashmin" aria-label="Rashmin"><div class="avatar"><span class="avatar-initials male">RA</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Rashmin</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="2" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>2</span></button></div><div class="card female" role="button" tabindex="0" data-pid="gita" aria-label="Gita"><div class="avatar"><span class="avatar-initials female">GI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Gita</span></div></div></div><ul class="kids"><li class="unit" data-main="kosha"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="kosha" aria-label="Kosha"><div class="avatar"><span class="avatar-initials female">KO</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Kosha</span></div></div></div></li><li class="unit" data-main="laksha"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="laksha" aria-label="Laksha"><div class="avatar"><span class="avatar-initials female">LA</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Laksha</span></div></div></div></li></ul></li><li class="unit left" data-main="jayesh"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="jayesh" aria-label="Jayesh (Raju)"><div class="avatar"><span class="avatar-initials male">J(</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Jayesh (Raju)</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="1" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>1</span></button></div><div class="card female" role="button" tabindex="0" data-pid="kirtika" aria-label="Kirtika"><div class="avatar"><span class="avatar-initials female">KI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Kirtika</span></div></div></div><ul class="kids"><li class="unit" data-main="niva"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="niva" aria-label="Niva"><div class="avatar"><span class="avatar-initials female">NI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Niva</span></div></div></div></li></ul></li><li class="unit left" data-main="sheetal"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="sujit" aria-label="Sujit"><div class="avatar"><span class="avatar-initials male">SU</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Sujit</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="2" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>2</span></button></div><div class="card female" role="button" tabindex="0" data-pid="sheetal" aria-label="Sheetal (Babloo)"><div class="avatar"><span class="avatar-initials female">S(</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Sheetal (Babloo)</span></div></div></div><ul class="kids"><li class="unit" data-main="simran"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="simran" aria-label="Simran"><div class="avatar"><span class="avatar-initials female">SI</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Simran</span></div></div></div></li><li class="unit" data-main="shanaya"><div class="couple"><div class="card female" role="button" tabindex="0" data-pid="shanaya" aria-label="Shanaya"><div class="avatar"><span class="avatar-initials female">SH</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Shanaya</span></div></div></div></li></ul></li><li class="unit left" data-main="dipu"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="dipu" aria-label="Dipu"><div class="avatar"><span class="avatar-initials male">DI</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Dipu</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button><button type="button" class="desc-btn" data-toggle="desc" data-count="2" aria-expanded="true" aria-label="Hide descendants" title="Hide descendants"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path class="v" d="M12 5v14"/></svg><span>2</span></button></div><div class="card female" role="button" tabindex="0" data-pid="suvarna" aria-label="Suvarna"><div class="avatar"><span class="avatar-initials female">SU</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Suvarna</span></div></div></div><ul class="kids"><li class="unit" data-main="dhruti"><div class="couple"><div class="card male" role="button" tabindex="0" data-pid="ishan" aria-label="Ishan"><div class="avatar"><span class="avatar-initials male">IS</span></div><div class="name"><svg class="g-icon male" aria-hidden="true"><use href="#icon-male"/></svg><span>Ishan</span></div></div><div class="marriage" title="Married"><button type="button" class="heart-btn" data-toggle="spouse" aria-expanded="true" aria-label="Hide spouse" title="Hide spouse"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-heart"/></svg></button></div><div class="card female" role="button" tabindex="0" data-pid="dhruti" aria-label="Dhruti"><div class="avatar"><span class="avatar-initials female">DH</span></div><div class="name"><svg class="g-icon female" aria-hidden="true"><use href="#icon-female"/></svg><span>Dhruti</span></div></div></div></li></ul></li></ul></li></ul></li></ul>
+  </div>
+</div>
+
+<details class="stats"><summary>Living members</summary><table><tr><td>Punamchand</td><td>15</td></tr><tr><td>Mohanlal</td><td>23</td></tr><tr><td>Shantibhai</td><td>4</td></tr><tr><td>Nanubhai</td><td>15</td></tr><tr><td>Govindbhai</td><td>16</td></tr><tr class="total"><td>Total</td><td>73</td></tr></table></details>
+
+<aside id="detail-panel" inert aria-label="Person details">
+  <button id="close-panel" aria-label="Close">&times;</button>
+  <div id="panel-body"></div>
+</aside>
+
+<script type="application/json" id="people-data">{"nagardas": {"id": "nagardas", "name": "Nagardas", "gender": "male", "initials": "NA", "photo": "", "dates": "d. 1983-01-17", "birth": "", "death": "1983-01-17", "notes": "", "spouses": ["dahiben"], "parents": [], "children": ["punamchand", "mohanlal_sr", "shantibhai", "nanubhai", "govindbhai"]}, "dahiben": {"id": "dahiben", "name": "Dahiben", "gender": "female", "initials": "DA", "photo": "", "dates": "d. 1959-07", "birth": "", "death": "1959-07", "notes": "", "spouses": ["nagardas"], "parents": [], "children": ["punamchand", "mohanlal_sr", "shantibhai", "nanubhai", "govindbhai"]}, "punamchand": {"id": "punamchand", "name": "Punamchand", "gender": "male", "initials": "PU", "photo": "", "dates": "d. 1998-09-15", "birth": "", "death": "1998-09-15", "notes": "", "spouses": ["narmadaben"], "parents": ["nagardas", "dahiben"], "children": ["rashmi", "alka", "parikshit", "harshad", "bakul", "mini"]}, "narmadaben": {"id": "narmadaben", "name": "Narmadaben", "gender": "female", "initials": "NA", "photo": "", "dates": "d. 2006-02-28", "birth": "", "death": "2006-02-28", "notes": "", "spouses": ["punamchand"], "parents": [], "children": ["rashmi", "alka", "parikshit", "harshad", "bakul", "mini"]}, "rashmi": {"id": "rashmi", "name": "Rashmi", "gender": "male", "initials": "RA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["jaya"], "parents": ["punamchand", "narmadaben"], "children": ["chaitali"]}, "jaya": {"id": "jaya", "name": "Jaya", "gender": "female", "initials": "JA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["rashmi"], "parents": [], "children": ["chaitali"]}, "chaitali": {"id": "chaitali", "name": "Chaitali", "gender": "female", "initials": "CH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["rashmi", "jaya"], "children": []}, "alka": {"id": "alka", "name": "Alka", "gender": "female", "initials": "AL", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["mohanlal_alka"], "parents": ["punamchand", "narmadaben"], "children": []}, "mohanlal_alka": {"id": "mohanlal_alka", "name": "Mohanlal", "gender": "male", "initials": "MO", "photo": "", "dates": "d. 2017-06-23", "birth": "", "death": "2017-06-23", "notes": "Husband of Alka. Same first name as the Mohanlal branch founder; confirm naming.", "spouses": ["alka"], "parents": [], "children": []}, "parikshit": {"id": "parikshit", "name": "Parikshit", "gender": "male", "initials": "PA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["naneeta"], "parents": ["punamchand", "narmadaben"], "children": ["krisha"]}, "naneeta": {"id": "naneeta", "name": "Naneeta", "gender": "female", "initials": "NA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["parikshit"], "parents": [], "children": ["krisha"]}, "krisha": {"id": "krisha", "name": "Krisha", "gender": "female", "initials": "KR", "photo": "", "dates": "b. 2014-08-21", "birth": "2014-08-21", "death": "", "notes": "", "spouses": [], "parents": ["parikshit", "naneeta"], "children": []}, "harshad": {"id": "harshad", "name": "Harshad", "gender": "male", "initials": "HA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["kalyani"], "parents": ["punamchand", "narmadaben"], "children": ["pooja", "priya"]}, "kalyani": {"id": "kalyani", "name": "Kalyani", "gender": "female", "initials": "KA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["harshad"], "parents": [], "children": ["pooja", "priya"]}, "pooja": {"id": "pooja", "name": "Pooja", "gender": "female", "initials": "PO", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["vikram"], "parents": ["harshad", "kalyani"], "children": ["devanshi"]}, "vikram": {"id": "vikram", "name": "Vikram", "gender": "male", "initials": "VI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["pooja"], "parents": [], "children": ["devanshi"]}, "devanshi": {"id": "devanshi", "name": "Devanshi", "gender": "female", "initials": "DE", "photo": "", "dates": "b. 2017-09-09", "birth": "2017-09-09", "death": "", "notes": "", "spouses": [], "parents": ["pooja", "vikram"], "children": []}, "priya": {"id": "priya", "name": "Priya", "gender": "female", "initials": "PR", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["harshad", "kalyani"], "children": []}, "bakul": {"id": "bakul", "name": "Bakul", "gender": "female", "initials": "BA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["punamchand", "narmadaben"], "children": []}, "mini": {"id": "mini", "name": "Mini", "gender": "female", "initials": "MI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["punamchand", "narmadaben"], "children": []}, "mohanlal_sr": {"id": "mohanlal_sr", "name": "Mohanlal", "gender": "male", "initials": "MO", "photo": "", "dates": "d. 2006-05-10", "birth": "", "death": "2006-05-10", "notes": "Son of Nagardas and Dahiben.", "spouses": ["giriaben"], "parents": ["nagardas", "dahiben"], "children": ["bharat", "renuka", "pradueman", "pratik", "manoj", "mohit", "rohini"]}, "giriaben": {"id": "giriaben", "name": "Giriaben", "gender": "female", "initials": "GI", "photo": "", "dates": "d. 2020-03-30", "birth": "", "death": "2020-03-30", "notes": "", "spouses": ["mohanlal_sr"], "parents": [], "children": ["bharat", "renuka", "pradueman", "pratik", "manoj", "mohit", "rohini"]}, "bharat": {"id": "bharat", "name": "Bharat", "gender": "male", "initials": "BH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["veena"], "parents": ["mohanlal_sr", "giriaben"], "children": ["akshay", "manan"]}, "veena": {"id": "veena", "name": "Veena", "gender": "female", "initials": "VE", "photo": "", "dates": "d. 2019-08-14", "birth": "", "death": "2019-08-14", "notes": "", "spouses": ["bharat"], "parents": [], "children": ["akshay", "manan"]}, "akshay": {"id": "akshay", "name": "Akshay", "gender": "male", "initials": "AK", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["zalak"], "parents": ["bharat", "veena"], "children": ["shreeya"]}, "zalak": {"id": "zalak", "name": "Zalak", "gender": "female", "initials": "ZA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["akshay"], "parents": [], "children": ["shreeya"]}, "shreeya": {"id": "shreeya", "name": "Shreeya", "gender": "female", "initials": "SH", "photo": "", "dates": "b. 2015-07-05", "birth": "2015-07-05", "death": "", "notes": "", "spouses": [], "parents": ["akshay", "zalak"], "children": []}, "manan": {"id": "manan", "name": "Manan", "gender": "male", "initials": "MA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["shruti"], "parents": ["bharat", "veena"], "children": []}, "shruti": {"id": "shruti", "name": "Shruti", "gender": "female", "initials": "SH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["manan"], "parents": [], "children": []}, "renuka": {"id": "renuka", "name": "Renuka", "gender": "female", "initials": "RE", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["narendra"], "parents": ["mohanlal_sr", "giriaben"], "children": ["rutvij", "viral"]}, "narendra": {"id": "narendra", "name": "Narendra", "gender": "male", "initials": "NA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["renuka"], "parents": [], "children": ["rutvij", "viral"]}, "rutvij": {"id": "rutvij", "name": "Rutvij", "gender": "male", "initials": "RU", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["shairee"], "parents": ["renuka", "narendra"], "children": ["nishtha", "twisha"]}, "shairee": {"id": "shairee", "name": "Shairee", "gender": "female", "initials": "SH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["rutvij"], "parents": [], "children": ["nishtha", "twisha"]}, "nishtha": {"id": "nishtha", "name": "Nishtha", "gender": "female", "initials": "NI", "photo": "", "dates": "b. 2017-05-11", "birth": "2017-05-11", "death": "", "notes": "", "spouses": [], "parents": ["rutvij", "shairee"], "children": []}, "twisha": {"id": "twisha", "name": "Twisha", "gender": "female", "initials": "TW", "photo": "", "dates": "b. 2020-06-03", "birth": "2020-06-03", "death": "", "notes": "", "spouses": [], "parents": ["rutvij", "shairee"], "children": []}, "viral": {"id": "viral", "name": "Viral", "gender": "male", "initials": "VI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["renuka", "narendra"], "children": []}, "pradueman": {"id": "pradueman", "name": "Pradueman", "gender": "male", "initials": "PR", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["pratima"], "parents": ["mohanlal_sr", "giriaben"], "children": []}, "pratima": {"id": "pratima", "name": "Pratima", "gender": "female", "initials": "PR", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["pradueman"], "parents": [], "children": []}, "pratik": {"id": "pratik", "name": "Pratik", "gender": "male", "initials": "PR", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["hiral"], "parents": ["mohanlal_sr", "giriaben"], "children": []}, "hiral": {"id": "hiral", "name": "Hiral", "gender": "female", "initials": "HI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["pratik"], "parents": [], "children": []}, "manoj": {"id": "manoj", "name": "Manoj", "gender": "male", "initials": "MA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["ashwini"], "parents": ["mohanlal_sr", "giriaben"], "children": []}, "ashwini": {"id": "ashwini", "name": "Ashwini", "gender": "female", "initials": "AS", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["manoj"], "parents": [], "children": []}, "mohit": {"id": "mohit", "name": "Mohit", "gender": "male", "initials": "MO", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["mohanlal_sr", "giriaben"], "children": []}, "rohini": {"id": "rohini", "name": "Rohini", "gender": "female", "initials": "RO", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["rajendra"], "parents": ["mohanlal_sr", "giriaben"], "children": ["revati"]}, "rajendra": {"id": "rajendra", "name": "Rajendra", "gender": "male", "initials": "RA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["rohini"], "parents": [], "children": ["revati"]}, "revati": {"id": "revati", "name": "Revati", "gender": "female", "initials": "RE", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["rohini", "rajendra"], "children": []}, "shantibhai": {"id": "shantibhai", "name": "Shantibhai", "gender": "male", "initials": "SH", "photo": "", "dates": "d. 2021-05-02", "birth": "", "death": "2021-05-02", "notes": "", "spouses": ["gopikaben"], "parents": ["nagardas", "dahiben"], "children": ["seema", "anjali"]}, "gopikaben": {"id": "gopikaben", "name": "Gopikaben", "gender": "female", "initials": "GO", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["shantibhai"], "parents": [], "children": ["seema", "anjali"]}, "seema": {"id": "seema", "name": "Seema", "gender": "female", "initials": "SE", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["amit"], "parents": ["shantibhai", "gopikaben"], "children": []}, "amit": {"id": "amit", "name": "Amit", "gender": "male", "initials": "AM", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["seema"], "parents": [], "children": []}, "anjali": {"id": "anjali", "name": "Anjali", "gender": "female", "initials": "AN", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["shantibhai", "gopikaben"], "children": []}, "nanubhai": {"id": "nanubhai", "name": "Nanubhai", "gender": "male", "initials": "NA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["sushilaben"], "parents": ["nagardas", "dahiben"], "children": ["pankaj"]}, "sushilaben": {"id": "sushilaben", "name": "Sushilaben", "gender": "female", "initials": "SU", "photo": "", "dates": "d. 2015-02-27", "birth": "", "death": "2015-02-27", "notes": "", "spouses": ["nanubhai"], "parents": [], "children": ["pankaj"]}, "pankaj": {"id": "pankaj", "name": "Pankaj (Raja)", "gender": "male", "initials": "P(", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["saroj"], "parents": ["nanubhai", "sushilaben"], "children": ["amiira", "tiaara", "akanksha", "trishna", "swapneel", "rita"]}, "saroj": {"id": "saroj", "name": "Saroj", "gender": "female", "initials": "SA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["pankaj"], "parents": [], "children": ["amiira", "tiaara", "akanksha", "trishna", "swapneel", "rita"]}, "akanksha": {"id": "akanksha", "name": "Akanksha", "gender": "female", "initials": "AK", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["shahid"], "parents": ["pankaj", "saroj"], "children": []}, "shahid": {"id": "shahid", "name": "Shahid", "gender": "male", "initials": "SH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["akanksha"], "parents": [], "children": []}, "amiira": {"id": "amiira", "name": "Amiira", "gender": "female", "initials": "AM", "photo": "", "dates": "b. 2018-01-18", "birth": "2018-01-18", "death": "", "notes": "", "spouses": [], "parents": ["pankaj", "saroj"], "children": []}, "trishna": {"id": "trishna", "name": "Trishna", "gender": "female", "initials": "TR", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["rohail"], "parents": ["pankaj", "saroj"], "children": []}, "rohail": {"id": "rohail", "name": "Rohail", "gender": "male", "initials": "RO", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["trishna"], "parents": [], "children": []}, "tiaara": {"id": "tiaara", "name": "Tiaara", "gender": "female", "initials": "TI", "photo": "", "dates": "b. 2019-10-01", "birth": "2019-10-01", "death": "", "notes": "", "spouses": [], "parents": ["pankaj", "saroj"], "children": []}, "swapneel": {"id": "swapneel", "name": "Swapneel", "gender": "male", "initials": "SW", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["pankaj", "saroj"], "children": []}, "rita": {"id": "rita", "name": "Rita", "gender": "female", "initials": "RI", "photo": "", "dates": "d. 2003-04-16", "birth": "", "death": "2003-04-16", "notes": "", "spouses": [], "parents": ["pankaj", "saroj"], "children": ["nita", "dina"]}, "nita": {"id": "nita", "name": "Nita", "gender": "female", "initials": "NI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["sunilkumar"], "parents": ["rita"], "children": []}, "sunilkumar": {"id": "sunilkumar", "name": "Sunilkumar", "gender": "male", "initials": "SU", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["nita"], "parents": [], "children": []}, "dina": {"id": "dina", "name": "Dina", "gender": "female", "initials": "DI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["dinyar"], "parents": ["rita"], "children": ["diana"]}, "dinyar": {"id": "dinyar", "name": "Dinyar", "gender": "male", "initials": "DI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["dina"], "parents": [], "children": ["diana"]}, "diana": {"id": "diana", "name": "Diana", "gender": "female", "initials": "DI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["dina", "dinyar"], "children": []}, "govindbhai": {"id": "govindbhai", "name": "Govindbhai", "gender": "male", "initials": "GO", "photo": "", "dates": "d. 2021-05-16", "birth": "", "death": "2021-05-16", "notes": "", "spouses": ["jashodaben"], "parents": ["nagardas", "dahiben"], "children": ["gita", "jayesh", "sheetal", "dipu"]}, "jashodaben": {"id": "jashodaben", "name": "Jashodaben", "gender": "female", "initials": "JA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["govindbhai"], "parents": [], "children": ["gita", "jayesh", "sheetal", "dipu"]}, "gita": {"id": "gita", "name": "Gita", "gender": "female", "initials": "GI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["rashmin"], "parents": ["govindbhai", "jashodaben"], "children": ["kosha", "laksha"]}, "rashmin": {"id": "rashmin", "name": "Rashmin", "gender": "male", "initials": "RA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["gita"], "parents": [], "children": ["kosha", "laksha"]}, "kosha": {"id": "kosha", "name": "Kosha", "gender": "female", "initials": "KO", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["gita", "rashmin"], "children": []}, "laksha": {"id": "laksha", "name": "Laksha", "gender": "female", "initials": "LA", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["gita", "rashmin"], "children": []}, "jayesh": {"id": "jayesh", "name": "Jayesh (Raju)", "gender": "male", "initials": "J(", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["kirtika"], "parents": ["govindbhai", "jashodaben"], "children": ["niva"]}, "kirtika": {"id": "kirtika", "name": "Kirtika", "gender": "female", "initials": "KI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["jayesh"], "parents": [], "children": ["niva"]}, "niva": {"id": "niva", "name": "Niva", "gender": "female", "initials": "NI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["jayesh", "kirtika"], "children": []}, "sheetal": {"id": "sheetal", "name": "Sheetal (Babloo)", "gender": "female", "initials": "S(", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["sujit"], "parents": ["govindbhai", "jashodaben"], "children": ["simran", "shanaya"]}, "sujit": {"id": "sujit", "name": "Sujit", "gender": "male", "initials": "SU", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["sheetal"], "parents": [], "children": ["simran", "shanaya"]}, "simran": {"id": "simran", "name": "Simran", "gender": "female", "initials": "SI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["sheetal", "sujit"], "children": []}, "shanaya": {"id": "shanaya", "name": "Shanaya", "gender": "female", "initials": "SH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": [], "parents": ["sheetal", "sujit"], "children": []}, "dipu": {"id": "dipu", "name": "Dipu", "gender": "male", "initials": "DI", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["suvarna"], "parents": ["govindbhai", "jashodaben"], "children": ["dhruti"]}, "suvarna": {"id": "suvarna", "name": "Suvarna", "gender": "female", "initials": "SU", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["dipu"], "parents": [], "children": ["dhruti"]}, "dhruti": {"id": "dhruti", "name": "Dhruti", "gender": "female", "initials": "DH", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["ishan"], "parents": ["dipu", "suvarna"], "children": []}, "ishan": {"id": "ishan", "name": "Ishan", "gender": "male", "initials": "IS", "photo": "", "dates": "", "birth": "", "death": "", "notes": "", "spouses": ["dhruti"], "parents": [], "children": []}}</script>
+
+<script>
+(() => {
+  'use strict';
+  const MIN_SCALE = 0.2;
+  const MAX_SCALE = 2.5;
+  const FIT_PADDING = 48;
+  const READABLE_SCALE = 0.6;   /* opening zoom for large trees; below this, cards are hard to read */
+
+  const viewport = document.getElementById('viewport');
+  const canvas = document.getElementById('tree-canvas');
+  const svg = document.getElementById('links');
+  const linkPath = document.getElementById('links-path');
+  const panel = document.getElementById('detail-panel');
+  const panelBody = document.getElementById('panel-body');
+  const searchInput = document.getElementById('search-input');
+  const searchResults = document.getElementById('search-results');
+  const PEOPLE = JSON.parse(document.getElementById('people-data').textContent);
+
+  let scale = 1;
+  let tx = 0;
+  let ty = 0;
+  const pointers = new Map();
+  let drag = null;
+  let pinchDist = 0;
+  let lastToggleTap = 0;
+
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[ch]);
+  const cssEsc = s => (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
+
+  function apply() {
+    canvas.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+  }
+
+  /* Zoom so the point under (clientX, clientY) stays put. */
+  function zoomAt(clientX, clientY, next) {
+    next = clamp(next, MIN_SCALE, MAX_SCALE);
+    const r = viewport.getBoundingClientRect();
+    const qx = clientX - (r.left + r.width / 2);
+    const qy = clientY - (r.top + r.height / 2);
+    const k = next / scale;
+    tx = qx - k * (qx - tx);
+    ty = qy - k * (qy - ty);
+    scale = next;
+    apply();
+  }
+
+  function zoomBy(factor) {
+    const r = viewport.getBoundingClientRect();
+    zoomAt(r.left + r.width / 2, r.top + r.height / 2, scale * factor);
+  }
+
+  /* Whole tree inside the window, centred. Never enlarges beyond 100%. */
+  function fit() {
+    const r = viewport.getBoundingClientRect();
+    const s = Math.min(1, (r.width - FIT_PADDING) / canvas.offsetWidth, (r.height - FIT_PADDING) / canvas.offsetHeight);
+    scale = clamp(s, MIN_SCALE, MAX_SCALE);
+    tx = 0;
+    ty = 0;
+    apply();
+  }
+
+  function cardFor(pid) {
+    return canvas.querySelector(`.card[data-pid="${cssEsc(pid)}"]`);
+  }
+
+  /* Pan so the element sits in the visible area (left of the panel when it is open). */
+  function centerOn(el) {
+    const vr = viewport.getBoundingClientRect();
+    const er = el.getBoundingClientRect();
+    const visibleWidth = vr.width - (panel.classList.contains('open') ? panel.offsetWidth : 0);
+    tx += (vr.left + visibleWidth / 2) - (er.left + er.width / 2);
+    ty += (vr.top + vr.height / 2) - (er.top + er.height / 2);
+    apply();
+  }
+
+  function focusPerson(pid) {
+    const card = cardFor(pid);
+    if (card) centerOn(card);
+  }
+
+  /*
+   * Connectors, one path for the whole tree.
+   * Horizontal groups: stem from the heart, a bus across the children, and a drop to each child's top centre.
+   * Stacked groups: stem from the heart down and left to a spine, with an elbow into each child's couple.
+   */
+  function drawLinks() {
+    const cr = canvas.getBoundingClientRect();
+    const box = el => {
+      const r = el.getBoundingClientRect();
+      return {
+        left: (r.left - cr.left) / scale,
+        right: (r.right - cr.left) / scale,
+        top: (r.top - cr.top) / scale,
+        bottom: (r.bottom - cr.top) / scale,
+        cx: ((r.left + r.right) / 2 - cr.left) / scale,
+        cy: ((r.top + r.bottom) / 2 - cr.top) / scale
+      };
+    };
+
+    let d = '';
+    canvas.querySelectorAll('li.unit').forEach(unit => {
+      if (unit.closest('[hidden]')) return;   /* inside a collapsed branch */
+      const kids = unit.querySelector(':scope > .kids:not([hidden])');
+      if (!kids) return;
+      const kidUnits = [...kids.querySelectorAll(':scope > li.unit')];
+      if (!kidUnits.length) return;
+
+      const couple = unit.querySelector(':scope > .couple');
+      const start = box(unit.querySelector(':scope > .couple > .marriage .heart-btn')
+        || unit.querySelector(':scope > .couple > .card:not([hidden])'));
+      const sx = Math.round(start.cx);
+      const sy = Math.round(start.bottom);
+      const cb = box(couple);
+
+      if (kids.classList.contains('stacked')) {
+        const spineX = Math.round(box(kids).left + 12);
+        const busY = Math.round(cb.bottom + 8);
+        const rows = kidUnits.map(li => {
+          const c = box(li.querySelector(':scope > .couple'));
+          return { y: Math.round(c.cy), left: Math.round(c.left) };
+        });
+        d += `M${sx} ${sy}V${busY}H${spineX}V${rows[rows.length - 1].y}`;
+        rows.forEach(r => { d += `M${spineX} ${r.y}H${r.left}`; });
+        return;
+      }
+
+      const anchors = kidUnits.map(li =>
+        box(li.querySelector(`:scope > .couple > .card[data-pid="${cssEsc(li.dataset.main)}"]`))
+      );
+      const kidTop = Math.min(...anchors.map(a => a.top));
+      const busY = Math.round((cb.bottom + kidTop) / 2);
+      const xs = anchors.map(a => Math.round(a.cx));
+      const lo = Math.min(sx, ...xs);
+      const hi = Math.max(sx, ...xs);
+
+      d += `M${sx} ${sy}V${busY}`;
+      if (hi > lo) d += `M${lo} ${busY}H${hi}`;
+      anchors.forEach((a, i) => { d += `M${xs[i]} ${busY}V${Math.round(a.top)}`; });
+    });
+
+    linkPath.setAttribute('d', d);
+    svg.setAttribute('width', canvas.offsetWidth);
+    svg.setAttribute('height', canvas.offsetHeight);
+  }
+
+  /* Collapse / expand: spouse and descendants of a family unit */
+  function setDesc(unit, show) {
+    const kids = unit.querySelector(':scope > .kids');
+    if (!kids) return;
+    kids.hidden = !show;
+    const btn = unit.querySelector(':scope > .couple .desc-btn');
+    if (btn) {
+      btn.setAttribute('aria-expanded', String(show));
+      const label = show ? 'Hide descendants' : 'Show descendants';
+      btn.title = label;
+      btn.setAttribute('aria-label', label);
+    }
+    drawLinks();
+  }
+
+  function setSpouse(unit, show) {
+    const mainId = cssEsc(unit.dataset.main);
+    unit.querySelectorAll(':scope > .couple > .card:not([data-pid="' + mainId + '"])')
+      .forEach(el => { el.hidden = !show; });
+    const marriage = unit.querySelector(':scope > .couple > .marriage');
+    if (marriage) marriage.classList.toggle('collapsed', !show);
+    const heart = unit.querySelector(':scope > .couple .heart-btn');
+    if (heart) {
+      heart.setAttribute('aria-expanded', String(show));
+      const label = show ? 'Hide spouse' : 'Show spouse';
+      heart.title = label;
+      heart.setAttribute('aria-label', label);
+    }
+    drawLinks();
+  }
+
+  function handleToggle(btn) {
+    const unit = btn.closest('li.unit');
+    const show = btn.getAttribute('aria-expanded') === 'false';
+    if (btn.dataset.toggle === 'desc') setDesc(unit, show);
+    else setSpouse(unit, show);
+  }
+
+  /* Keyboard activation of a focused toggle fires click; pointer taps are handled in release() */
+  canvas.addEventListener('click', e => {
+    const btn = e.target.closest('[data-toggle]');
+    if (!btn || performance.now() - lastToggleTap < 500) return;
+    handleToggle(btn);
+  });
+
+  /* Make a person visible: expand collapsed branches and show a hidden spouse */
+  function revealPerson(pid) {
+    let node = cardFor(pid);
+    while (node && node !== canvas) {
+      if (node.matches && node.matches('.kids[hidden]')) setDesc(node.parentElement, true);
+      if (node.matches && node.matches('.card[hidden]')) setSpouse(node.closest('li.unit'), true);
+      node = node.parentElement;
+    }
+  }
+
+  /* Pointer pan (mouse and touch), pinch zoom, and tap to open a person or press a toggle */
+  function pinchStats() {
+    const [a, b] = [...pointers.values()];
+    return { dist: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
+  }
+
+  viewport.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoomAt(e.clientX, e.clientY, scale * (e.deltaY > 0 ? 0.9 : 1.1));
+  }, { passive: false });
+
+  viewport.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    viewport.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 1) {
+      drag = { sx: e.clientX, sy: e.clientY, moved: false };
+      viewport.classList.add('dragging');
+    } else if (pointers.size === 2) {
+      pinchDist = pinchStats().dist;
+      if (drag) drag.moved = true;
+    }
+  });
+
+  viewport.addEventListener('pointermove', e => {
+    if (!pointers.has(e.pointerId)) return;
+    const prev = pointers.get(e.pointerId);
+    const now = { x: e.clientX, y: e.clientY };
+    pointers.set(e.pointerId, now);
+    if (pointers.size === 1 && drag) {
+      if (Math.hypot(now.x - drag.sx, now.y - drag.sy) > 6) drag.moved = true;
+      tx += now.x - prev.x;
+      ty += now.y - prev.y;
+      apply();
+    } else if (pointers.size === 2) {
+      const st = pinchStats();
+      if (pinchDist > 0) zoomAt(st.cx, st.cy, scale * (st.dist / pinchDist));
+      pinchDist = st.dist;
+    }
+  });
+
+  function release(e) {
+    if (!pointers.has(e.pointerId)) return;
+    const wasSingle = pointers.size === 1;
+    pointers.delete(e.pointerId);
+
+    if (wasSingle && drag && !drag.moved && e.type === 'pointerup') {
+      const hit = document.elementFromPoint(e.clientX, e.clientY);
+      const tog = hit && hit.closest ? hit.closest('[data-toggle]') : null;
+      const card = hit && hit.closest ? hit.closest('.card') : null;
+      if (tog) {
+        lastToggleTap = performance.now();
+        handleToggle(tog);
+      } else if (card) {
+        openPerson(card.dataset.pid);
+      } else {
+        closePanel();
+      }
+    }
+
+    if (pointers.size === 1) {
+      const [remaining] = pointers.values();
+      drag = { sx: remaining.x, sy: remaining.y, moved: true };
+    }
+    if (pointers.size === 0) {
+      drag = null;
+      viewport.classList.remove('dragging');
+    }
+    pinchDist = 0;
+  }
+  viewport.addEventListener('pointerup', release);
+  viewport.addEventListener('pointercancel', release);
+
+  /* Detail panel */
+  function avatarHTML(p) {
+    return p.photo
+      ? `<div class="avatar"><img class="avatar-img" src="${esc(p.photo)}" alt="" data-initials="${esc(p.initials)}" data-gender="${p.gender}"></div>`
+      : `<div class="avatar"><span class="avatar-initials ${p.gender}">${esc(p.initials)}</span></div>`;
+  }
+
+  function renderPanel(p) {
+    const field = (label, value) => value
+      ? `<div class="field"><div class="label">${label}</div><div class="value">${esc(value)}</div></div>`
+      : '';
+    const rels = (label, ids) => ids.length
+      ? `<div class="field"><div class="label">${label}</div><div class="rels">${ids.map(id =>
+          `<button class="rel" data-pid="${esc(id)}">${esc(PEOPLE[id] ? PEOPLE[id].name : id)}</button>`
+        ).join('')}</div></div>`
+      : '';
+    const icon = p.gender === 'unknown'
+      ? ''
+      : `<svg class="g-icon ${p.gender}" aria-hidden="true"><use href="#icon-${p.gender}"/></svg>`;
+    return `<div class="p-head">${avatarHTML(p)}<h2>${icon}<span>${esc(p.name)}</span></h2></div>`
+      + field('Born', p.birth)
+      + field('Died', p.death)
+      + field('Notes', p.notes)
+      + rels(p.spouses.length > 1 ? 'Spouses' : 'Spouse', p.spouses)
+      + rels('Parents', p.parents)
+      + rels('Children', p.children);
+  }
+
+  function openPerson(pid) {
+    const p = PEOPLE[pid];
+    if (!p) return;
+    canvas.querySelectorAll('.card.selected').forEach(c => c.classList.remove('selected'));
+    const card = cardFor(pid);
+    if (card) card.classList.add('selected');
+    panelBody.innerHTML = renderPanel(p);
+    panel.classList.add('open');
+    panel.removeAttribute('inert');
+  }
+
+  function closePanel() {
+    panel.classList.remove('open');
+    panel.setAttribute('inert', '');
+    canvas.querySelectorAll('.card.selected').forEach(c => c.classList.remove('selected'));
+  }
+
+  document.getElementById('close-panel').addEventListener('click', closePanel);
+  panelBody.addEventListener('click', e => {
+    const btn = e.target.closest('button.rel');
+    if (!btn) return;
+    openPerson(btn.dataset.pid);
+    focusPerson(btn.dataset.pid);
+  });
+
+  /* Search: filter by name; Enter opens the first match and centres it */
+  function renderSearch() {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!q) {
+      searchResults.hidden = true;
+      searchResults.innerHTML = '';
+      return;
+    }
+    const hits = Object.values(PEOPLE)
+      .filter(p => p.name.toLowerCase().includes(q))
+      .slice(0, 8);
+    searchResults.innerHTML = hits.length
+      ? hits.map(p => `<li><button type="button" data-pid="${esc(p.id)}">${esc(p.name)}<small>${esc(p.dates)}</small></button></li>`).join('')
+      : '<li class="none">No match</li>';
+    searchResults.hidden = false;
+  }
+
+  function pickPerson(pid) {
+    revealPerson(pid);
+    openPerson(pid);
+    focusPerson(pid);
+    searchResults.hidden = true;
+  }
+
+  searchInput.addEventListener('input', renderSearch);
+  searchInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      const first = searchResults.querySelector('button[data-pid]');
+      if (first) pickPerson(first.dataset.pid);
+    } else if (e.key === 'Escape') {
+      searchInput.value = '';
+      renderSearch();
+      searchInput.blur();
+    }
+  });
+  searchResults.addEventListener('click', e => {
+    const btn = e.target.closest('button[data-pid]');
+    if (btn) pickPerson(btn.dataset.pid);
+  });
+
+  /* Controls */
+  document.getElementById('zoom-in').addEventListener('click', () => zoomBy(1.2));
+  document.getElementById('zoom-out').addEventListener('click', () => zoomBy(1 / 1.2));
+  document.getElementById('fit').addEventListener('click', () => fit());
+  document.getElementById('clean').addEventListener('click', () => document.body.classList.toggle('clean'));
+
+  document.addEventListener('keydown', e => {
+    const typing = document.activeElement === searchInput;
+    if (e.key === '/' && !typing) {
+      e.preventDefault();
+      searchInput.focus();
+    } else if (e.key === 'Escape') {
+      closePanel();
+    } else if (!typing && (e.key === 'h' || e.key === 'H')) {
+      document.body.classList.toggle('clean');
+    } else if (!typing && (e.key === 'f' || e.key === 'F')) {
+      fit();
+    }
+  });
+
+  /* Clicks on a card or toggle, or a keypress on a focused card, handled above; Enter/Space on a card opens it */
+  canvas.addEventListener('keydown', e => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('card')) {
+      e.preventDefault();
+      openPerson(e.target.dataset.pid);
+    }
+  });
+
+  /* Missing photos fall back to initials */
+  function swapToInitials(img) {
+    const span = document.createElement('span');
+    span.className = 'avatar-initials ' + (img.dataset.gender || 'unknown');
+    span.textContent = img.dataset.initials || '';
+    img.replaceWith(span);
+  }
+  document.addEventListener('error', e => {
+    if (e.target instanceof HTMLImageElement && e.target.classList.contains('avatar-img')) {
+      swapToInitials(e.target);
+    }
+  }, true);
+
+  /* Init: open readable on the founders, or the whole tree when ?view=fit (for slides) */
+  function init() {
+    document.querySelectorAll('img.avatar-img').forEach(img => {
+      if (img.complete && img.naturalWidth === 0) swapToInitials(img);
+    });
+    if (new URLSearchParams(location.search).get('view') === 'fit') {
+      fit();
+    } else {
+      const vr = viewport.getBoundingClientRect();
+      const fitScale = Math.min(1, (vr.width - FIT_PADDING) / canvas.offsetWidth, (vr.height - FIT_PADDING) / canvas.offsetHeight);
+      scale = clamp(Math.max(fitScale, READABLE_SCALE), MIN_SCALE, MAX_SCALE);
+      tx = 0;
+      ty = 0;
+      apply();
+      const founders = canvas.querySelector(':scope > .tree > .unit > .couple');
+      if (founders) centerOn(founders);
+    }
+    drawLinks();
+  }
+  window.addEventListener('load', init);
+  if (document.fonts) document.fonts.ready.then(drawLinks);
+})();
+</script>
+</body>
+</html>
